@@ -2,7 +2,7 @@ import json
 import sys
 from PIL import Image
 import requests
-from pyflink.common import Types
+from pyflink.common import Types, TypeInformation
 from pyflink.datastream import StreamExecutionEnvironment, SourceFunction
 from pyflink.datastream.connectors import (FlinkKafkaConsumer,
                                            FlinkKafkaProducer)
@@ -12,7 +12,7 @@ from tfserving_prediction_getter import get_d
 from tfserving_prediction_getter import get_url
 import socket
 
-socket.setdefaulttimeout(100)
+socket.setdefaulttimeout(10)
 
 
 def get_pred(img: Image) -> str:
@@ -64,16 +64,18 @@ def flink_main() -> None:
     #     properties={'bootstrap.servers': 'localhost:9092'})
     # ds = env.add_source(kafka_source)
 
-    ds = env.from_collection([b'123'], type_info=Types.BYTE())
-    msg_list = []
-    with ds.execute_and_collect() as results:
-        for msg in results:
-            msg_list.append(msg)
-    predictions = msg_to_pred(msg_list)
+    ds = env.from_collection(['1230000', '1230000'], type_info=Types.STRING())
+    # msg_list = []
+    # with ds.execute_and_collect() as results:
+    #     for msg in results:
+    #         msg_list.append(msg)
+    # predictions = msg_to_pred(msg_list)
 
-    ds = env.from_collection(
-        collection=predictions,
-        type_info=Types.STRING())
+    ds = ds.map(lambda x: str(x), output_type=Types.STRING())
+
+    # ds = env.from_collection(
+    #     collection=predictions,
+    #     type_info=Types.STRING())
 
     kafka_sink = FlinkKafkaProducer(
         topic='predictions',
@@ -84,6 +86,8 @@ def flink_main() -> None:
 
 
 if __name__ == '__main__':
+    # print(b'313233'.decode('utf-8'))
+    # assert 1==2
     flink_main()
 
 
