@@ -1,10 +1,9 @@
-from matplotlib import pyplot as plt
-
 from trainer import get_images_paths
 from kafka import KafkaProducer, KafkaConsumer
 from PIL import Image
 import json
-from bson import json_util
+import time
+
 
 SEP = b'S19283746E'
 
@@ -41,13 +40,11 @@ def open_image(string: bytes) -> Image:
     img = Image.frombytes('RGB',
                           (int_from_bytes(w), int_from_bytes(h)),
                           img)
-    img.show()
-    plt.show()
     return img
 
 
 def images_to_kafka() -> None:
-    img_paths = get_images_paths()[:5]
+    img_paths = get_images_paths()[:1]
     producer = KafkaProducer(bootstrap_servers='localhost:9092')
     count = 0
     for i, img_path in enumerate(img_paths):
@@ -59,15 +56,18 @@ def images_to_kafka() -> None:
             for j in range(lbs//f + 1):
                 count += 1
                 sub_msg = bs[j*f:(j+1)*f]
-                value = {'i': i, 'j': j, 'json_value': sub_msg}
+                value = {'i': i, 'j': j,
+                         'time': int(round(time.time() * 1000)),
+                         'json_value': sub_msg}
                 value = json.dumps(value).encode('latin1')
                 producer.send('img', value=value)
         else:
             count += 1
-            value = {'i': i, 'j': 0, 'json_value': bs}
+            value = {'i': i, 'j': 0,
+                     'time': int(round(time.time() * 1000)),
+                     'json_value': bs}
             value = json.dumps(value).encode('latin1')
             producer.send('img', value=value)
-    print('total message count:', count)
 
 
 def read_topic(topic_name: str) -> None:
@@ -81,7 +81,7 @@ def read_topic(topic_name: str) -> None:
     for item in consumer:
         d = item.value.decode('latin1')
         jsn = json.loads(d)
-        i, j, value = jsn.values()
+        i, j, _, value = jsn.values()
 
         if i == prev_i:
             msg += value
@@ -91,9 +91,8 @@ def read_topic(topic_name: str) -> None:
             msg = value
     if msg != b'':
         images.append(open_image(msg.encode('latin1')))
-    print(len(images))
 
 
 if __name__ == '__main__':
-    # images_to_kafka()
+    images_to_kafka()
     read_topic('img')

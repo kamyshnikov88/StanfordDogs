@@ -3,15 +3,51 @@ import json
 
 from PIL import Image
 import requests
-from matplotlib import pyplot as plt
-from pyflink.common import Types
+from pyflink.common import Types, Time, WatermarkStrategy
+from pyflink.common.watermark_strategy import TimestampAssigner
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors import (FlinkKafkaConsumer,
                                            FlinkKafkaProducer)
 from pyflink.common.serialization import SimpleStringSchema
+from pyflink.datastream.window import EventTimeSessionWindows
 from kafka_client import open_image
 from tfserving_prediction_getter import get_d
 from tfserving_prediction_getter import get_url
+
+MSG_SEP = '|msg||msg|'
+SUB_MSG_SEP = '|sub_msg||sub_msg|'
+
+
+class MyTimestampAssigner(TimestampAssigner):
+    def extract_timestamp(self, value, record_timestamp) -> int:
+        jsn = json.loads(value)
+        _, _, time, _ = jsn.values()
+        return time
+
+
+def decode_key(msg) -> tuple:
+    jsn = json.loads(msg)
+    i, j, _, value = jsn.values()
+    return i, str(j) + SUB_MSG_SEP + value
+
+
+def fetch_parts(cum_msg, msg):
+    v = cum_msg[-1] if MSG_SEP in cum_msg[-1] else cum_msg[-1] + MSG_SEP
+    return cum_msg[0], v + msg[-1] + MSG_SEP
+
+
+def sum_parts(msg: str):
+    value = msg[1][:-len(MSG_SEP)]
+    if MSG_SEP in value:
+        t = value.split(MSG_SEP)
+    else:
+        return value.split(SUB_MSG_SEP)[1]
+    msg_j_v = list(map(lambda x: (x.split(SUB_MSG_SEP)[0],
+                                  x.split(SUB_MSG_SEP)[1]),
+                       t))
+    msg = sorted(msg_j_v, key=lambda x: x[0])
+    _, parts = zip(*msg)
+    return functools.reduce(lambda x, y: x + y, parts)
 
 
 def get_pred(img: Image) -> str:
@@ -30,100 +66,52 @@ def get_pred(img: Image) -> str:
     except requests.exceptions.HTTPError:
         raise Exception(response.json()['error'])
     pred = response.json()['predictions'][0]
-    print('get_pred FINALLY')
     return d[pred.index(max(pred))]
 
 
-def msg_to_pred(msg_list: list) -> list:
-    preds = []
-    msg = b''
-    prev_i = 0
-    for msg in msg_list:
-        key = msg.key.decode()
-        value = msg.value
-        if '|' in key:
-            if int(key.split('|')[0]) == prev_i:
-                msg += value
-            else:
-                prev_i = int(key.split('|')[0])
-                preds.append(get_pred(open_image(msg).resize((299, 299))))
-                msg = value
-        else:
-            prev_i += 1
-            preds.append(get_pred(open_image(value).resize((299, 299))))
-    if msg != b'':
-        preds.append(get_pred(open_image(msg).resize((299, 299))))
-    return preds
-
-
-def decode_key(msg: str) -> tuple:
-    jsn = json.loads(msg)
-    i, j, value = jsn.values()
-    return i, j, value
-
-
-def fetch_parts(cum_msg, msg):
-    print(123)
-    cum_msg_v = cum_msg[-1]
-    if isinstance(cum_msg_v, str):
-        cum_msg_v = [tuple([cum_msg[1], cum_msg[-1]])]
-    cum_msg_v.append(tuple([msg[1], msg[-1]]))
-    return cum_msg[0], 0, cum_msg_v
-
-
-def sum_parts(msg: list):
-    # print(type(msg))
-    # print(type(msg))
-    # print(len(msg))
-    # msg = sorted(msg, key=lambda x: x[0])
-    # _, parts = zip(*msg)
-    # return sum(parts)
-    return 0
+def get_predict(msg):
+    img = open_image(sum_parts(msg).encode('latin1')).resize((299, 299))
+    return get_pred(img)
 
 
 def flink_main() -> None:
     env = StreamExecutionEnvironment.get_execution_environment()
-    project_path = 'file:///Users/kamyshnikovy/PycharmProjects/StanfordDogs/'
-    flink_path = project_path + 'data/flink/'
-    jar_names = [
-        'flink-connector-kafka_2.12-1.14.4.jar',
-        'kafka-clients-2.4.1.jar',
-        'flink-connector-base-1.14.4.jar',
-        'flink-shaded-force-shading-14.0.jar',
-        'lz4-java-1.6.0.jar',
-        'slf4j-api-1.7.28.jar',
-        'snappy-java-1.1.7.3.jar',
-        'zstd-jni-1.4.3-1.jar'
-        ]
-    jar_names = list(map(lambda x: flink_path + x, jar_names))
 
-    env.add_jars(*jar_names)
+    env.set_parallelism(1)
+
     kafka_source = FlinkKafkaConsumer(
         topics='img',
         deserialization_schema=SimpleStringSchema(),
         properties={'bootstrap.servers': 'localhost:9092',
-                    'auto.offset.reset': 'earliest'
+                    'auto.offset.reset': 'earliest',
                     })
     ds = env.add_source(kafka_source)
 
-    ds = (ds
-          .map(decode_key)
-          .key_by(lambda x: x[0])
-          .reduce(lambda c, d: fetch_parts(c, d))
-          .map(lambda z: print(len(z[-1])))
-          .map(sum_parts)
-          .map(lambda x: get_pred(open_image(x.encode('latin1')).resize((299, 299)))))
+    watermark_strategy = (WatermarkStrategy.
+                          for_monotonous_timestamps()
+                          .with_timestamp_assigner(MyTimestampAssigner()))
 
-    # kafka_sink = FlinkKafkaProducer(
-    #     topic='predictions',
-    #     serialization_schema=SimpleStringSchema(),
-    #     producer_config={'bootstrap.servers': 'localhost:9092'})
-    # ds.add_sink(kafka_sink)
+    ds = (ds
+          .assign_timestamps_and_watermarks(watermark_strategy)
+          .map(decode_key,
+               output_type=Types.TUPLE([Types.INT(), Types.STRING()]))
+          .key_by(lambda k: k[0], key_type=Types.INT())
+          .window(EventTimeSessionWindows.with_gap(Time.seconds(1)))
+          .reduce(reduce_function=lambda x, y: fetch_parts(x, y),
+                  output_type=Types.STRING())
+          .map(lambda e: get_predict(e), output_type=Types.STRING())
+          )
+
+    kafka_sink = FlinkKafkaProducer(
+        topic='predictions',
+        serialization_schema=SimpleStringSchema(),
+        producer_config={'bootstrap.servers': 'localhost:9092'})
+    ds.add_sink(kafka_sink)
     env.execute('flink_main')
 
 
 if __name__ == '__main__':
-    # flink_main()
+    flink_main()
 
 
 

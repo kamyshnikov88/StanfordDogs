@@ -128,7 +128,6 @@ def train(n_epochs, train_data, val_data, model,
 
 if __name__ == '__main__':
     img_paths = get_images_paths()
-    assert 1==2
     dog_breeds = [path.split('-')[-1].split('/')[0] for path in img_paths]
     dog_breeds = np.array(dog_breeds)
     targets = LabelEncoder().fit_transform(dog_breeds)
