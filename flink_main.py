@@ -10,7 +10,7 @@ from pyflink.datastream.connectors import (FlinkKafkaConsumer,
                                            FlinkKafkaProducer)
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream.window import EventTimeSessionWindows
-from kafka_client import open_image
+from kafka_client import open_image, get_f
 from tfserving_prediction_getter import get_d
 from tfserving_prediction_getter import get_url
 
@@ -25,19 +25,30 @@ class MyTimestampAssigner(TimestampAssigner):
         return time
 
 
-def decode_key(msg) -> tuple:
+def decode_key(msg: str) -> tuple:
     jsn = json.loads(msg)
     i, j, _, value = jsn.values()
-    return i, str(j) + SUB_MSG_SEP + value
+    return i, str(j) + SUB_MSG_SEP + value if value != '' else ''
 
 
-def fetch_parts(cum_msg, msg):
+def fetch_parts(cum_msg: tuple, msg: tuple) -> tuple:
     v = cum_msg[-1] if MSG_SEP in cum_msg[-1] else cum_msg[-1] + MSG_SEP
     return cum_msg[0], v + msg[-1] + MSG_SEP
 
 
-def sum_parts(msg: str):
-    value = msg[1][:-len(MSG_SEP)]
+def get_predict(msg: tuple) -> str:
+    if msg[1] == '':
+        print('predict from flink was delivered to kafka (technical)')
+        return ''
+    img = open_image(sum_parts(msg).encode('latin1')).resize((299, 299))
+    print('predict from flink was delivered to kafka')
+    return get_pred(img)
+
+
+def sum_parts(msg: tuple) -> str:
+    value = msg[1][:-len(MSG_SEP)] if len(msg[1]) > get_f() else msg[1]
+    if value == '':
+        return ''
     if MSG_SEP in value:
         t = value.split(MSG_SEP)
     else:
@@ -67,11 +78,6 @@ def get_pred(img: Image) -> str:
         raise Exception(response.json()['error'])
     pred = response.json()['predictions'][0]
     return d[pred.index(max(pred))]
-
-
-def get_predict(msg):
-    img = open_image(sum_parts(msg).encode('latin1')).resize((299, 299))
-    return get_pred(img)
 
 
 def flink_main() -> None:

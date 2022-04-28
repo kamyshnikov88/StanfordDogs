@@ -33,10 +33,9 @@ def get_images_paths():
                   .joinpath("StanfordDogs")
                   .joinpath("data")
                   .joinpath("Images")
-                  .joinpath("n02092002-Scottish_deerhound")
                   )
     os.chdir(images_dir)
-    return glob.glob('./*.jpg')
+    return np.array(glob.glob('./**/*.jpg'))
 
 
 class DatasetSD(Dataset):
@@ -128,6 +127,11 @@ def train(n_epochs, train_data, val_data, model,
 
 if __name__ == '__main__':
     img_paths = get_images_paths()
+
+    # numpy to provide indexing in dataset constructor
+    # as train_indices and val_indices are numpy.int64 objects
+    img_paths = np.array(img_paths)
+
     dog_breeds = [path.split('-')[-1].split('/')[0] for path in img_paths]
     dog_breeds = np.array(dog_breeds)
     targets = LabelEncoder().fit_transform(dog_breeds)

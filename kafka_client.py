@@ -1,15 +1,23 @@
+import random
+
+from pyflink.common import SimpleStringSchema, JsonRowSerializationSchema, \
+    Types
+from pyflink.datastream import DataStream, StreamExecutionEnvironment
+
 from trainer import get_images_paths
 from kafka import KafkaProducer, KafkaConsumer
+from pyflink.datastream.connectors import FlinkKafkaProducer
 from PIL import Image
 import json
 import time
 
 
 SEP = b'S19283746E'
+F = 150000
 
 
-def get_separator():
-    return SEP
+def get_f():
+    return F
 
 
 def int_to_bytes(x: int) -> bytes:
@@ -36,6 +44,8 @@ def get_extended_byte_string(img: Image):
 
 
 def open_image(string: bytes) -> Image:
+    if string == b'':
+        return ''
     w, h, img = string.split(SEP)
     img = Image.frombytes('RGB',
                           (int_from_bytes(w), int_from_bytes(h)),
@@ -43,31 +53,124 @@ def open_image(string: bytes) -> Image:
     return img
 
 
-def images_to_kafka() -> None:
-    img_paths = get_images_paths()[:1]
-    producer = KafkaProducer(bootstrap_servers='localhost:9092')
-    count = 0
-    for i, img_path in enumerate(img_paths):
-        img = Image.open(img_path)
-        bs = get_extended_byte_string(img).decode('latin1')
-        lbs = len(bs)
-        f = 150000
-        if lbs > f:  # if kafka message can't contain whole image
-            for j in range(lbs//f + 1):
-                count += 1
-                sub_msg = bs[j*f:(j+1)*f]
-                value = {'i': i, 'j': j,
+# def images_to_kafka() -> None:
+#     n_pics = 0
+#     for _ in range(50):
+#         all_img_paths = get_images_paths()
+#         # all_img_paths = ['/Users/kamyshnikovy/PycharmProjects/StanfordDogs/data/Images/n02105505-komondor/n02105505_3904.jpg']
+#         n = random.randint(1, 5)
+#         n_pics += n
+#         indices = [random.randint(0, len(all_img_paths)) for _ in range(n)]
+#         time.sleep(n)
+#         img_paths = all_img_paths[indices]
+#         # img_paths = all_img_paths
+#         # print(img_paths)
+#         producer = KafkaProducer(bootstrap_servers='localhost:9092')
+#         count = 0
+#         for i, img_path in enumerate(img_paths):
+#             img = Image.open(img_path)
+#             ebs = get_extended_byte_string(img)
+#             if len(ebs.split(SEP)) > 3:
+#                 print(img_path)
+#                 assert 1==2
+#             bs = ebs.decode('latin1')
+#             # if _ == :
+#             #     bs_e = bs.encode('latin1')
+#             #     print(bs_e[:25], bs_e[-25:], sep='       ')
+#             # print(len(bs)//150000 + 1)
+#             # print(len(bs))
+#                 # if i == list(enumerate(img_paths))[-1][0]:
+#                 #     assert 1==2
+#                 # continue
+#             # else:
+#             #     break
+#             lbs = len(bs)
+#             f = 150000
+#             j = 0
+#             if lbs > f:  # if kafka message can't contain whole image
+#                 for j in range(lbs//f + 1):
+#                     # print(j)
+#                     count += 1
+#                     sub_msg = bs[j*f:(j+1)*f]
+#                     value = {'i': i, 'j': j,
+#                              'time': int(round(time.time() * 1000)),
+#                              'json_value': sub_msg}
+#                     value = json.dumps(value).encode('latin1')
+#                     producer.send('img', value=value)
+#             else:
+#                 count += 1
+#                 value = {'i': i, 'j': 0,
+#                          'time': int(round(time.time() * 1000)),
+#                          'json_value': bs}
+#                 value = json.dumps(value).encode('latin1')
+#                 producer.send('img', value=value)
+#             # print('pic', str(j))
+#         # if _ != 4:
+#         #     continue
+#         time.sleep(1.05)
+#         value = {'i': -1111111111, 'j': -1111111111,
+#                  'time': int(round(time.time() * 1000)),
+#                  'json_value': ''}
+#         value = json.dumps(value).encode('latin1')
+#         producer.send('img', value=value)
+#         print('batch was delivered to kafka')
+#     # print(n_pics)
+
+
+def write_to_kafka_by_flink(values: list):
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(1)
+
+    ds = env.from_collection(values, type_info=Types.STRING())
+    kafka_sink = FlinkKafkaProducer(
+        topic='img',
+        serialization_schema=SimpleStringSchema(),
+        producer_config={'bootstrap.servers': 'localhost:9092'
+                         # 'max.in.flight.requests.per.connection': '1'
+                         })
+    ds.add_sink(kafka_sink)
+    env.execute('flink_main')
+
+
+def images_to_kafka_by_flink() -> None:
+    n_msg = 0
+    for _ in range(100):
+        n = random.randint(1, 5)
+        time.sleep(n)
+
+        all_img_paths = get_images_paths()
+        indices = [random.randint(0, len(all_img_paths)) for _ in range(n)]
+        img_paths = all_img_paths[indices]
+        to_flink = []
+        for i, img_path in enumerate(img_paths):
+            img = Image.open(img_path)
+            ebs = get_extended_byte_string(img)
+            bs = ebs.decode('latin1')
+            lbs = len(bs)
+            n_msg += lbs//F + 1
+            if lbs > F:  # if kafka message can't contain whole image
+                for j in range(lbs//F + 1):
+                    sub_msg = bs[j*F:(j+1)*F]
+                    value = {'i': i, 'j': j,
+                             'time': int(round(time.time() * 1000)),
+                             'json_value': sub_msg}
+                    value = json.dumps(value)
+                    to_flink.append(value)
+            else:
+                value = {'i': i, 'j': 0,
                          'time': int(round(time.time() * 1000)),
-                         'json_value': sub_msg}
-                value = json.dumps(value).encode('latin1')
-                producer.send('img', value=value)
-        else:
-            count += 1
-            value = {'i': i, 'j': 0,
-                     'time': int(round(time.time() * 1000)),
-                     'json_value': bs}
-            value = json.dumps(value).encode('latin1')
-            producer.send('img', value=value)
+                         'json_value': bs}
+                value = json.dumps(value)
+                to_flink.append(value)
+
+        # add technical value to close last window in flink while reading
+        time.sleep(1.05)
+        technical_value = {'i': -1, 'j': -1,
+                           'time': int(round(time.time() * 1000)),
+                           'json_value': ''}
+        technical_value = json.dumps(technical_value)
+        write_to_kafka_by_flink(to_flink + [technical_value])
+        print('batch was delivered to kafka by flink')
 
 
 def read_topic(topic_name: str) -> None:
@@ -78,21 +181,29 @@ def read_topic(topic_name: str) -> None:
     images = []
     msg = ''
     prev_i = 0
-    for item in consumer:
-        d = item.value.decode('latin1')
+    prev_j = -1
+    for i, item in enumerate(consumer):
+        value = item.value
+        if value == '':
+            continue
+        d = value.decode('latin1')
         jsn = json.loads(d)
         i, j, _, value = jsn.values()
 
-        if i == prev_i:
+        if i == prev_i and j > prev_j:
             msg += value
+            prev_j += 1
         else:
             prev_i = i
+            prev_j = -1
             images.append(open_image(msg.encode('latin1')))
             msg = value
     if msg != b'':
         images.append(open_image(msg.encode('latin1')))
+    # print(len([x for x in images if x != '']))
 
 
 if __name__ == '__main__':
-    images_to_kafka()
-    read_topic('img')
+    # images_to_kafka()
+    images_to_kafka_by_flink()
+    # read_topic('img')
